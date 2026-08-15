@@ -98,7 +98,8 @@ export function HeroSection({
     setErrorMessage(null);
 
     try {
-      const response = await fetch("/api/fetch-info", {
+      const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL || "";
+      const response = await fetch(`${backendUrl}/api/fetch-info`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ url: url.trim() }),

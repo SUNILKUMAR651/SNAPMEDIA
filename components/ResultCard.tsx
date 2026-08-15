@@ -37,7 +37,8 @@ export function ResultCard({ data, onReset }: ResultCardProps) {
     setCompletedFormatId(null);
 
     // Build the streaming download URL with query params
-    const downloadEndpoint = `/api/download?url=${encodeURIComponent(data.originalUrl)}&format_id=${encodeURIComponent(
+    const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL || "";
+    const downloadEndpoint = `${backendUrl}/api/download?url=${encodeURIComponent(data.originalUrl)}&format_id=${encodeURIComponent(
       format.id
     )}&is_audio=${isAudio}&title=${encodeURIComponent(data.title)}&ext=${format.ext}`;
 
