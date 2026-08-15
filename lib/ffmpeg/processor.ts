@@ -95,12 +95,7 @@ export function createDownloadStream(options: StreamProcessingOptions): StreamRe
       url
     );
   } else {
-    if (formatId && formatId !== "best" && !formatId.includes("+") && formatId !== "bestvideo+bestaudio/best") {
-      args.push("-f", `${formatId}[ext=mp4]+bestaudio[ext=m4a]/${formatId}+bestaudio/best[ext=mp4]/best`);
-    } else {
-      args.push("-f", "best[ext=mp4]/bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best");
-    }
-    args.push("--merge-output-format", "mp4");
+    args.push("-f", "best[ext=mp4]/bestvideo[ext=mp4]+bestaudio[ext=m4a]/best");
     args.push(url);
   }
 

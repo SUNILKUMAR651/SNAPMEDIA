@@ -474,7 +474,7 @@ app.post("/api/fetch-info", async (req, res) => {
 });
 
 // GET /api/download
-app.get("/api/download", (req, res) => {
+app.get("/api/download", async (req, res) => {
   const { url, format_id = "best", is_audio = "false", bitrate = "320k", title = "video", ext = "mp4" } = req.query;
 
   if (!url) {
@@ -489,32 +489,6 @@ app.get("/api/download", (req, res) => {
   const encodedUtf8Name = encodeURIComponent(filename);
   const contentType = isAudio ? "audio/mpeg" : "video/mp4";
 
-  const args = [
-    "-o", "-",
-    "--no-playlist",
-    "--no-warnings",
-    "--no-check-certificates",
-    "--socket-timeout", "35",
-    "--geo-bypass",
-    "--extractor-args", "youtube:player_client=mweb,ios,android,web,tv",
-    "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-  ];
-
-  if (ffmpegDir) {
-    args.push("--ffmpeg-location", ffmpegDir);
-  }
-
-  if (isAudio) {
-    args.push("-x", "--audio-format", "mp3", "--audio-quality", bitrate === "320k" ? "0" : "5", url);
-  } else {
-    if (format_id && format_id !== "best" && !format_id.includes("+") && format_id !== "bestvideo+bestaudio/best") {
-      args.push("-f", `${format_id}[ext=mp4]+bestaudio[ext=m4a]/${format_id}+bestaudio/best[ext=mp4]/best`);
-    } else {
-      args.push("-f", "best[ext=mp4]/bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best");
-    }
-    args.push("--merge-output-format", "mp4", url);
-  }
-
   res.setHeader("Content-Type", contentType);
   res.setHeader(
     "Content-Disposition",
@@ -522,25 +496,92 @@ app.get("/api/download", (req, res) => {
   );
   res.setHeader("Cache-Control", "no-cache, no-store, must-revalidate");
 
-  const child = spawn(ytdlpPath, args, { stdio: ["ignore", "pipe", "pipe"] });
+  // If video download, try direct GoogleVideo stream for 100% genuine MP4 playback
+  if (!isAudio) {
+    try {
+      const getUrlArgs = [
+        "-g",
+        "--no-playlist",
+        "--no-warnings",
+        "--no-check-certificates",
+        "-f", "best[ext=mp4]/bestvideo[ext=mp4]+bestaudio[ext=m4a]/best",
+        url.trim()
+      ];
 
-  child.stdout.pipe(res);
+      const { stdout: directUrlOut } = await execAsync(`"${ytdlpPath}" ${getUrlArgs.map(a => `"${a}"`).join(" ")}`);
+      const directUrl = directUrlOut.trim().split("\n")[0];
 
-  child.stderr.on("data", (chunk) => {
-    const text = chunk.toString();
-    if (text.includes("ERROR:")) console.error("yt-dlp error:", text);
-  });
+      if (directUrl && directUrl.startsWith("http")) {
+        const https = require("https");
+        const http = require("http");
+        const client = directUrl.startsWith("https") ? https : http;
 
-  child.on("error", (err) => {
-    console.error("Child process error:", err);
-    if (!res.headersSent) res.status(500).send("Stream process error.");
-  });
+        const proxyReq = client.get(directUrl, (stream) => {
+          if (stream.statusCode >= 200 && stream.statusCode < 300) {
+            if (stream.headers["content-length"]) {
+              res.setHeader("Content-Length", stream.headers["content-length"]);
+            }
+            stream.pipe(res);
+          } else {
+            fallbackSpawnDownload();
+          }
+        });
 
-  req.on("close", () => {
-    if (!child.killed) {
-      try { child.kill("SIGTERM"); } catch (e) {}
+        proxyReq.on("error", () => fallbackSpawnDownload());
+        req.on("close", () => proxyReq.destroy());
+        return;
+      }
+    } catch (e) {
+      // Fallback to spawn
     }
-  });
+  }
+
+  fallbackSpawnDownload();
+
+  function fallbackSpawnDownload() {
+    if (res.writableEnded) return;
+
+    const args = [
+      "-o", "-",
+      "--no-playlist",
+      "--no-warnings",
+      "--no-check-certificates",
+      "--socket-timeout", "35",
+      "--geo-bypass",
+      "--extractor-args", "youtube:player_client=mweb,ios,android,web,tv",
+      "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    ];
+
+    if (ffmpegDir) {
+      args.push("--ffmpeg-location", ffmpegDir);
+    }
+
+    if (isAudio) {
+      args.push("-x", "--audio-format", "mp3", "--audio-quality", bitrate === "320k" ? "0" : "5", url.trim());
+    } else {
+      args.push("-f", "best[ext=mp4]/bestvideo[ext=mp4]+bestaudio[ext=m4a]/best", url.trim());
+    }
+
+    const child = spawn(ytdlpPath, args, { stdio: ["ignore", "pipe", "pipe"] });
+
+    child.stdout.pipe(res);
+
+    child.stderr.on("data", (chunk) => {
+      const text = chunk.toString();
+      if (text.includes("ERROR:")) console.error("yt-dlp error:", text);
+    });
+
+    child.on("error", (err) => {
+      console.error("Child process error:", err);
+      if (!res.headersSent) res.status(500).send("Stream process error.");
+    });
+
+    req.on("close", () => {
+      if (!child.killed) {
+        try { child.kill("SIGTERM"); } catch (e) {}
+      }
+    });
+  }
 });
 
 app.listen(PORT, "0.0.0.0", () => {
