@@ -311,6 +311,12 @@ app.post("/api/fetch-info", async (req, res) => {
 
   if (!result.success || !result.stdout) {
     console.warn("yt-dlp fast extraction failed or timed out. Serving instant oEmbed metadata.", result?.stderr || "");
+    const isYouTube = /(?:youtube\.com|youtu\.be)/i.test(url);
+    const isInstagram = /instagram\.com/i.test(url);
+    const isTikTok = /tiktok\.com/i.test(url);
+    const isFacebook = /(?:facebook\.com|fb\.watch)/i.test(url);
+    const detectedPlatform = isYouTube ? "YouTube" : (isInstagram ? "Instagram" : (isTikTok ? "TikTok" : (isFacebook ? "Facebook" : "Social")));
+
     const isShorts = url.includes("shorts") || url.includes("reel") || url.includes("tiktok");
     const duration = isShorts ? 30 : 210;
 
@@ -319,11 +325,11 @@ app.post("/api/fetch-info", async (req, res) => {
       data: {
         id: oembed?.id || `video-${Date.now()}`,
         title: oembed?.title || "High Quality Video Stream",
-        uploader: oembed?.uploader || "Social Media Creator",
+        uploader: oembed?.uploader || "Axelith Mind",
         thumbnail: oembed?.thumbnail || "https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=1200&auto=format&fit=crop&q=80",
         durationSeconds: duration,
         durationFormatted: formatDuration(duration),
-        platform: "social",
+        platform: detectedPlatform,
         originalUrl: url.trim(),
         formats: [
           { id: "bestvideo+bestaudio/best", quality: "4K UHD (2160p)", ext: "mp4", resolution: "3840x2160", hasVideo: true, hasAudio: true, fileSize: "Auto 4K", approxBytes: 50000000 },
