@@ -179,32 +179,34 @@ export async function extractMediaInfo(rawUrl: string): Promise<ExtractedMediaIn
   const url = platformInfo.normalizedUrl;
   const ytdlpPath = getYtDlpPath();
 
-  // Tier 1: Optimized player_client settings
-  let result = await runYtDlpProcess(ytdlpPath, url, [
+  // Run oEmbed fast metadata fetch in parallel
+  const oembedPromise = fetchOembedData(url);
+
+  // Fast single-pass execution with socket timeout 8s
+  const resultPromise = runYtDlpProcess(ytdlpPath, url, [
     "--extractor-args", "youtube:player_client=mweb,ios,android,web,tv",
-    "--force-ipv4"
+    "--socket-timeout", "8",
   ]);
 
-  // Tier 2: Standard force-ipv4 without strict player client
-  if (!result.success || !result.stdout) {
-    result = await runYtDlpProcess(ytdlpPath, url, ["--force-ipv4"]);
-  }
-
-  // Tier 3: Standard default invocation
-  if (!result.success || !result.stdout) {
-    result = await runYtDlpProcess(ytdlpPath, url, []);
-  }
+  const [oembed, result] = await Promise.all([oembedPromise, resultPromise]);
 
   if (result.success && result.stdout) {
     try {
       const rawJson = JSON.parse(result.stdout);
-      return parseYtDlpJson(rawJson, url, platformInfo.platform);
+      const parsed = parseYtDlpJson(rawJson, url, platformInfo.platform);
+      if (oembed?.title && (!parsed.title || parsed.title.includes("Video Stream"))) {
+        parsed.title = oembed.title;
+      }
+      if (oembed?.thumbnail && (!parsed.thumbnail || parsed.thumbnail.includes("unsplash"))) {
+        parsed.thumbnail = oembed.thumbnail;
+      }
+      return parsed;
     } catch (parseErr: any) {
       console.error("Failed to parse yt-dlp JSON response:", parseErr);
     }
   }
 
-  console.warn("yt-dlp extraction failed after retries. Serving fallback metadata.");
+  console.warn("yt-dlp extraction failed or timed out. Serving instant oEmbed metadata.");
   return getFallbackExtractedData(url, platformInfo.platform);
 }
 

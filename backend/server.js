@@ -298,30 +298,44 @@ app.post("/api/fetch-info", async (req, res) => {
 
   const ytdlpPath = getYtDlpPath();
 
-  // Tier 1: Try with optimized player_clients (mweb, ios, android, web, tv)
-  let result = await executeYtDlp(ytdlpPath, url, [
+  // Run oEmbed fast metadata fetch in parallel
+  const oembedPromise = fetchOembedData(url);
+
+  // Fast single-pass execution with socket timeout 8s
+  const resultPromise = executeYtDlp(ytdlpPath, url, [
     "--extractor-args", "youtube:player_client=mweb,ios,android,web,tv",
-    "--force-ipv4"
+    "--socket-timeout", "8",
   ]);
 
-  // Tier 2: If Tier 1 failed, try without strict extractor args
-  if (!result.success || !result.stdout) {
-    result = await executeYtDlp(ytdlpPath, url, ["--force-ipv4"]);
-  }
-
-  // Tier 3: Try standard execution without force-ipv4
-  if (!result.success || !result.stdout) {
-    result = await executeYtDlp(ytdlpPath, url, []);
-  }
+  const [oembed, result] = await Promise.all([oembedPromise, resultPromise]);
 
   if (!result.success || !result.stdout) {
-    // If all yt-dlp extraction attempts fail (e.g. YouTube bot restriction or IP rate limit),
-    // return graceful fallback stream data with REAL oEmbed title & thumbnail so user can still proceed.
-    console.warn("yt-dlp extraction failed after retries. Serving rich fallback metadata.", result.stderr);
-    const fallbackData = await getFallbackServerData(url);
+    console.warn("yt-dlp fast extraction failed or timed out. Serving instant oEmbed metadata.", result?.stderr || "");
+    const isShorts = url.includes("shorts") || url.includes("reel") || url.includes("tiktok");
+    const duration = isShorts ? 30 : 210;
+
     return res.json({
       success: true,
-      data: fallbackData,
+      data: {
+        id: oembed?.id || `video-${Date.now()}`,
+        title: oembed?.title || "High Quality Video Stream",
+        uploader: oembed?.uploader || "Social Media Creator",
+        thumbnail: oembed?.thumbnail || "https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=1200&auto=format&fit=crop&q=80",
+        durationSeconds: duration,
+        durationFormatted: formatDuration(duration),
+        platform: "social",
+        originalUrl: url.trim(),
+        formats: [
+          { id: "bestvideo+bestaudio/best", quality: "4K UHD (2160p)", ext: "mp4", resolution: "3840x2160", hasVideo: true, hasAudio: true, fileSize: "Auto 4K", approxBytes: 50000000 },
+          { id: "best[height<=1080]", quality: "Full HD (1080p)", ext: "mp4", resolution: "1920x1080", hasVideo: true, hasAudio: true, fileSize: "Auto 1080p", approxBytes: 25000000 },
+          { id: "best[height<=720]", quality: "HD (720p)", ext: "mp4", resolution: "1280x720", hasVideo: true, hasAudio: true, fileSize: "Auto 720p", approxBytes: 15000000 },
+          { id: "best[height<=480]", quality: "SD (480p)", ext: "mp4", resolution: "854x480", hasVideo: true, hasAudio: true, fileSize: "Auto 480p", approxBytes: 8000000 },
+        ],
+        audioFormats: [
+          { id: "bestaudio", quality: "MP3 Audio (320kbps High Quality)", ext: "mp3", hasVideo: false, hasAudio: true, fileSize: "Auto MP3", approxBytes: 6000000 },
+          { id: "bestaudio[abr<=128]", quality: "MP3 Audio (128kbps Standard)", ext: "mp3", hasVideo: false, hasAudio: true, fileSize: "Auto MP3", approxBytes: 3000000 },
+        ],
+      },
     });
   }
 
