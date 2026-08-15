@@ -123,6 +123,50 @@ function getQualityLabel(height: number, fps?: number): string {
   return "Standard Quality";
 }
 
+function runYtDlpProcess(ytdlpPath: string, url: string, extraArgs: string[]): Promise<{ success: boolean; stdout: string; stderr: string }> {
+  return new Promise((resolve) => {
+    const baseArgs = [
+      "--dump-json",
+      "--no-warnings",
+      "--no-playlist",
+      "--no-check-certificates",
+      "--socket-timeout", "25",
+      "--geo-bypass",
+      "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    ];
+
+    const args = [...baseArgs, ...extraArgs, url];
+    let stdoutData = "";
+    let stderrData = "";
+
+    try {
+      const childProcess = spawn(ytdlpPath, args);
+
+      childProcess.stdout.on("data", (data: Buffer) => {
+        stdoutData += data.toString();
+      });
+
+      childProcess.stderr.on("data", (data: Buffer) => {
+        stderrData += data.toString();
+      });
+
+      childProcess.on("error", (err: any) => {
+        resolve({ success: false, stdout: "", stderr: err.message });
+      });
+
+      childProcess.on("close", (code: number) => {
+        if (code === 0 && stdoutData.trim()) {
+          resolve({ success: true, stdout: stdoutData.trim(), stderr: stderrData });
+        } else {
+          resolve({ success: false, stdout: stdoutData, stderr: stderrData });
+        }
+      });
+    } catch (e: any) {
+      resolve({ success: false, stdout: "", stderr: e.message });
+    }
+  });
+}
+
 /**
  * Execute yt-dlp to extract rich JSON info for a given URL.
  */
@@ -135,60 +179,33 @@ export async function extractMediaInfo(rawUrl: string): Promise<ExtractedMediaIn
   const url = platformInfo.normalizedUrl;
   const ytdlpPath = getYtDlpPath();
 
-  return new Promise((resolve, reject) => {
-    const args = [
-      "--dump-json",
-      "--no-warnings",
-      "--no-playlist",
-      "--no-check-certificates",
-      "--socket-timeout", "25",
-      "--geo-bypass",
-      "--extractor-args", "youtube:player_client=android_vr,ios,web",
-      "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-      url,
-    ];
+  // Tier 1: Optimized player_client settings
+  let result = await runYtDlpProcess(ytdlpPath, url, [
+    "--extractor-args", "youtube:player_client=mweb,ios,android,web,tv",
+    "--force-ipv4"
+  ]);
 
-    let stdoutData = "";
-    let stderrData = "";
-    let childProcess: any;
+  // Tier 2: Standard force-ipv4 without strict player client
+  if (!result.success || !result.stdout) {
+    result = await runYtDlpProcess(ytdlpPath, url, ["--force-ipv4"]);
+  }
 
+  // Tier 3: Standard default invocation
+  if (!result.success || !result.stdout) {
+    result = await runYtDlpProcess(ytdlpPath, url, []);
+  }
+
+  if (result.success && result.stdout) {
     try {
-      childProcess = spawn(ytdlpPath, args);
-    } catch (err: any) {
-      console.warn("yt-dlp binary spawn failed:", err.message);
-      return resolve(getFallbackExtractedData(url, platformInfo.platform));
+      const rawJson = JSON.parse(result.stdout);
+      return parseYtDlpJson(rawJson, url, platformInfo.platform);
+    } catch (parseErr: any) {
+      console.error("Failed to parse yt-dlp JSON response:", parseErr);
     }
+  }
 
-    childProcess.stdout.on("data", (data: Buffer) => {
-      stdoutData += data.toString();
-    });
-
-    childProcess.stderr.on("data", (data: Buffer) => {
-      stderrData += data.toString();
-    });
-
-    childProcess.on("error", (err: any) => {
-      console.warn("yt-dlp execution error:", err.message);
-      resolve(getFallbackExtractedData(url, platformInfo.platform));
-    });
-
-    childProcess.on("close", (code: number) => {
-      if (code !== 0 || !stdoutData.trim()) {
-        console.warn(`yt-dlp returned code (${code}):`, stderrData);
-        resolve(getFallbackExtractedData(url, platformInfo.platform));
-        return;
-      }
-
-      try {
-        const rawJson = JSON.parse(stdoutData.trim());
-        const parsed = parseYtDlpJson(rawJson, url, platformInfo.platform);
-        resolve(parsed);
-      } catch (parseErr: any) {
-        console.error("Failed to parse yt-dlp JSON response:", parseErr);
-        resolve(getFallbackExtractedData(url, platformInfo.platform));
-      }
-    });
-  });
+  console.warn("yt-dlp extraction failed after retries. Serving fallback metadata.");
+  return getFallbackExtractedData(url, platformInfo.platform);
 }
 
 function parseYtDlpJson(data: any, originalUrl: string, platform: SupportedPlatform): ExtractedMediaInfo {
