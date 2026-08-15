@@ -16,7 +16,7 @@ RUN pip3 install --no-cache-dir --break-system-packages -U yt-dlp
 WORKDIR /app
 
 COPY package.json ./
-RUN npm install --production
+RUN npm install --omit=dev
 
 COPY . .
 
