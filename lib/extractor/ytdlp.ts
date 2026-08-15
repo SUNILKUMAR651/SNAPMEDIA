@@ -348,26 +348,68 @@ function parseYtDlpJson(data: any, originalUrl: string, platform: SupportedPlatf
   };
 }
 
-function getFallbackExtractedData(url: string, platform: SupportedPlatform): ExtractedMediaInfo {
+async function fetchOembedData(url: string): Promise<{ title?: string; uploader?: string; thumbnail?: string } | null> {
+  try {
+    const isYouTube = /(?:youtube\.com|youtu\.be)/i.test(url);
+    const isTikTok = /tiktok\.com/i.test(url);
+
+    let apiUrl = "";
+    if (isYouTube) {
+      apiUrl = `https://www.youtube.com/oembed?url=${encodeURIComponent(url)}&format=json`;
+    } else if (isTikTok) {
+      apiUrl = `https://www.tiktok.com/oembed?url=${encodeURIComponent(url)}`;
+    } else {
+      apiUrl = `https://noembed.com/embed?url=${encodeURIComponent(url)}`;
+    }
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 4000);
+    const resp = await fetch(apiUrl, { signal: controller.signal });
+    clearTimeout(timeout);
+
+    if (resp.ok) {
+      const data = (await resp.json()) as any;
+      let thumbnail = data.thumbnail_url || "";
+
+      if (isYouTube && thumbnail) {
+        const idMatch = url.match(/(?:watch\?v=|shorts\/|embed\/|v\/|youtu\.be\/)([\w-]{11})/i);
+        if (idMatch && idMatch[1]) {
+          thumbnail = `https://i.ytimg.com/vi/${idMatch[1]}/maxresdefault.jpg`;
+        }
+      }
+
+      return {
+        title: data.title || undefined,
+        uploader: data.author_name || undefined,
+        thumbnail: thumbnail || undefined,
+      };
+    }
+  } catch {
+    // Ignore oembed errors
+  }
+  return null;
+}
+
+async function getFallbackExtractedData(url: string, platform: SupportedPlatform): Promise<ExtractedMediaInfo> {
   const isShorts = url.includes("shorts") || url.includes("reel") || url.includes("tiktok");
   const durationSec = isShorts ? 45 : 254;
+  const oembed = await fetchOembedData(url);
 
   return {
     id: `media-${Date.now()}`,
-    title: "Social Video Media Stream",
-    uploader: "Verified Media Creator",
-    thumbnail: "https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=1200&auto=format&fit=crop&q=80",
+    title: oembed?.title || "Social Video Media Stream",
+    uploader: oembed?.uploader || "Verified Media Creator",
+    thumbnail: oembed?.thumbnail || "https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=1200&auto=format&fit=crop&q=80",
     durationSeconds: durationSec,
     durationFormatted: formatDuration(durationSec),
     platform,
     originalUrl: url,
     formats: [
-      { id: "bestvideo+bestaudio/best", quality: "4K UHD (2160p)", ext: "mp4", resolution: "3840x2160", hasVideo: true, hasAudio: true, fileSize: "54.4 MB" },
-      { id: "best[height<=1440]", quality: "2K QHD (1440p)", ext: "mp4", resolution: "2560x1440", hasVideo: true, hasAudio: true, fileSize: "35.1 MB" },
-      { id: "best[height<=1080]", quality: "Full HD (1080p)", ext: "mp4", resolution: "1920x1080", hasVideo: true, hasAudio: true, fileSize: "30.0 MB" },
-      { id: "best[height<=720]", quality: "HD (720p)", ext: "mp4", resolution: "1280x720", hasVideo: true, hasAudio: true, fileSize: "16.1 MB" },
-      { id: "best[height<=480]", quality: "SD (480p)", ext: "mp4", resolution: "854x480", hasVideo: true, hasAudio: true, fileSize: "8.5 MB" },
-      { id: "best[height<=360]", quality: "360p", ext: "mp4", resolution: "640x360", hasVideo: true, hasAudio: true, fileSize: "5.5 MB" },
+      { id: "bestvideo+bestaudio/best", quality: "4K UHD (2160p)", ext: "mp4", resolution: "3840x2160", hasVideo: true, hasAudio: true, fileSize: "Auto 4K" },
+      { id: "best[height<=1080]", quality: "Full HD (1080p)", ext: "mp4", resolution: "1920x1080", hasVideo: true, hasAudio: true, fileSize: "Auto 1080p" },
+      { id: "best[height<=720]", quality: "HD (720p)", ext: "mp4", resolution: "1280x720", hasVideo: true, hasAudio: true, fileSize: "Auto 720p" },
+      { id: "best[height<=480]", quality: "SD (480p)", ext: "mp4", resolution: "854x480", hasVideo: true, hasAudio: true, fileSize: "Auto 480p" },
+      { id: "best[height<=360]", quality: "360p", ext: "mp4", resolution: "640x360", hasVideo: true, hasAudio: true, fileSize: "Auto 360p" },
     ],
     audioFormats: [
       { id: "bestaudio", quality: "MP3 Audio (320kbps High Quality)", ext: "mp3", hasVideo: false, hasAudio: true, fileSize: "Auto MP3" },

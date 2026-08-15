@@ -220,14 +220,58 @@ function executeYtDlp(ytdlpPath, url, extractorArgs = []) {
   });
 }
 
-function getFallbackServerData(url) {
+async function fetchOembedData(url) {
+  try {
+    const isYouTube = /(?:youtube\.com|youtu\.be)/i.test(url);
+    const isTikTok = /tiktok\.com/i.test(url);
+
+    let apiUrl = "";
+    if (isYouTube) {
+      apiUrl = `https://www.youtube.com/oembed?url=${encodeURIComponent(url)}&format=json`;
+    } else if (isTikTok) {
+      apiUrl = `https://www.tiktok.com/oembed?url=${encodeURIComponent(url)}`;
+    } else {
+      apiUrl = `https://noembed.com/embed?url=${encodeURIComponent(url)}`;
+    }
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 4000);
+    const resp = await fetch(apiUrl, { signal: controller.signal });
+    clearTimeout(timeout);
+
+    if (resp.ok) {
+      const data = await resp.json();
+      let thumbnail = data.thumbnail_url || "";
+
+      if (isYouTube && thumbnail) {
+        const idMatch = url.match(/(?:watch\?v=|shorts\/|embed\/|v\/|youtu\.be\/)([\w-]{11})/i);
+        if (idMatch && idMatch[1]) {
+          thumbnail = `https://i.ytimg.com/vi/${idMatch[1]}/maxresdefault.jpg`;
+        }
+      }
+
+      return {
+        title: data.title || undefined,
+        uploader: data.author_name || undefined,
+        thumbnail: thumbnail || undefined,
+      };
+    }
+  } catch (e) {
+    // Ignore oembed failure
+  }
+  return null;
+}
+
+async function getFallbackServerData(url) {
   const isShorts = url.includes("shorts") || url.includes("reel") || url.includes("tiktok");
   const duration = isShorts ? 30 : 210;
+  const oembed = await fetchOembedData(url);
+
   return {
     id: `video-${Date.now()}`,
-    title: "HD Video Stream (Instant Download)",
-    uploader: "Social Media Creator",
-    thumbnail: "https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=1200&auto=format&fit=crop&q=80",
+    title: oembed?.title || "HD Video Stream (Instant Download)",
+    uploader: oembed?.uploader || "Social Media Creator",
+    thumbnail: oembed?.thumbnail || "https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=1200&auto=format&fit=crop&q=80",
     durationSeconds: duration,
     durationFormatted: formatDuration(duration),
     platform: "social",
@@ -272,11 +316,12 @@ app.post("/api/fetch-info", async (req, res) => {
 
   if (!result.success || !result.stdout) {
     // If all yt-dlp extraction attempts fail (e.g. YouTube bot restriction or IP rate limit),
-    // return graceful fallback stream data so user can still proceed.
-    console.warn("yt-dlp extraction failed after retries. Serving fallback metadata.", result.stderr);
+    // return graceful fallback stream data with REAL oEmbed title & thumbnail so user can still proceed.
+    console.warn("yt-dlp extraction failed after retries. Serving rich fallback metadata.", result.stderr);
+    const fallbackData = await getFallbackServerData(url);
     return res.json({
       success: true,
-      data: getFallbackServerData(url),
+      data: fallbackData,
     });
   }
 
