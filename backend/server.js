@@ -496,9 +496,8 @@ app.get("/api/download", (req, res) => {
     "--no-check-certificates",
     "--socket-timeout", "35",
     "--geo-bypass",
-    "--force-ipv4",
-    "--extractor-args", "youtube:player_client=android_vr,android_creator,ios,mweb,web_creator",
-    "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+    "--extractor-args", "youtube:player_client=mweb,ios,android,web,tv",
+    "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
   ];
 
   if (ffmpegDir) {
@@ -508,12 +507,10 @@ app.get("/api/download", (req, res) => {
   if (isAudio) {
     args.push("-x", "--audio-format", "mp3", "--audio-quality", bitrate === "320k" ? "0" : "5", url);
   } else {
-    if (format_id && format_id !== "best" && !format_id.includes("+")) {
-      args.push("-f", `${format_id}+bestaudio/bestvideo+bestaudio/best[ext=mp4]/best`);
-    } else if (format_id && format_id.includes("+")) {
-      args.push("-f", format_id);
+    if (format_id && format_id !== "best" && !format_id.includes("+") && format_id !== "bestvideo+bestaudio/best") {
+      args.push("-f", `${format_id}[ext=mp4]+bestaudio[ext=m4a]/${format_id}+bestaudio/best[ext=mp4]/best`);
     } else {
-      args.push("-f", "bestvideo+bestaudio/best[ext=mp4]/best");
+      args.push("-f", "best[ext=mp4]/bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best");
     }
     args.push("--merge-output-format", "mp4", url);
   }
