@@ -195,7 +195,8 @@ app.post("/api/fetch-info", async (req, res) => {
     "--no-check-certificates",
     "--socket-timeout", "25",
     "--geo-bypass",
-    "--extractor-args", "youtube:player_client=android_vr,ios,web",
+    "--force-ipv4",
+    "--extractor-args", "youtube:player_client=android_vr,android_creator,ios,mweb,web_creator",
     "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
     url.trim(),
   ];
@@ -356,7 +357,8 @@ app.get("/api/download", (req, res) => {
     "--no-check-certificates",
     "--socket-timeout", "35",
     "--geo-bypass",
-    "--extractor-args", "youtube:player_client=android_vr,ios,web",
+    "--force-ipv4",
+    "--extractor-args", "youtube:player_client=android_vr,android_creator,ios,mweb,web_creator",
     "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
   ];
 

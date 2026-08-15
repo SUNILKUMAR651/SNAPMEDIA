@@ -1,5 +1,5 @@
-# Render-ready Dockerfile for SnapMedia Backend Service
-FROM node:20-bullseye-slim
+# Render-ready Dockerfile for SnapMedia Backend Service (Debian 12 Bookworm with Python 3.11)
+FROM node:20-bookworm-slim
 
 # Install system dependencies (ffmpeg, python3, pip, curl)
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -10,16 +10,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
-# Install and update yt-dlp to the latest release
-RUN pip3 install --no-cache-dir -U yt-dlp
+# Install latest yt-dlp release (break system packages flag for Debian 12 pip)
+RUN pip3 install --no-cache-dir --break-system-packages -U yt-dlp
 
 WORKDIR /app
 
-# Install npm dependencies
 COPY package.json ./
 RUN npm install --production
 
-# Copy backend source code
 COPY . .
 
 ENV PORT=10000
