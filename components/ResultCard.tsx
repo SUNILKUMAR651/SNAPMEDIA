@@ -33,14 +33,16 @@ export function ResultCard({ data, onReset }: ResultCardProps) {
 
   const handleDownload = (format: MediaFormat, isAudio: boolean = false) => {
     setDownloadingFormatId(format.id);
-    setDownloadProgress(10);
+    setDownloadProgress(15);
     setCompletedFormatId(null);
+
+    const bitrate = format.quality.includes("320") ? "320k" : (format.quality.includes("192") ? "192k" : "128k");
 
     // Build the streaming download URL with query params
     const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL || "";
     const downloadEndpoint = `${backendUrl}/api/download?url=${encodeURIComponent(data.originalUrl)}&format_id=${encodeURIComponent(
       format.id
-    )}&is_audio=${isAudio}&title=${encodeURIComponent(data.title)}&ext=${format.ext}`;
+    )}&is_audio=${isAudio}&bitrate=${bitrate}&title=${encodeURIComponent(data.title)}&ext=${format.ext}`;
 
     // Animated download progress feedback
     const interval = setInterval(() => {

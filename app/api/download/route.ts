@@ -4,6 +4,7 @@ import { checkRateLimit, getClientIp } from "@/lib/rate-limiter";
 import { Readable } from "stream";
 
 export const dynamic = "force-dynamic";
+export const maxDuration = 120; // Allow sufficient time for merging high-res videos
 
 function nodeReadableToWebReadable(nodeStream: Readable): ReadableStream {
   return new ReadableStream({
@@ -55,7 +56,7 @@ export async function GET(req: NextRequest) {
       return new NextResponse("Missing required 'url' parameter.", { status: 400 });
     }
 
-    const { stream, filename, contentType, cleanup } = createDownloadStream({
+    const { stream, filename, contentType, fileSize, cleanup } = await createDownloadStream({
       url,
       formatId,
       isAudioOnly: isAudio,
@@ -68,16 +69,22 @@ export async function GET(req: NextRequest) {
     const safeAsciiName = toSafeAsciiFilename(filename, ext);
     const encodedUtf8Name = encodeURIComponent(filename);
 
+    const headers: Record<string, string> = {
+      "Content-Type": contentType,
+      "Content-Disposition": `attachment; filename="${safeAsciiName}"; filename*=UTF-8''${encodedUtf8Name}`,
+      "Cache-Control": "no-cache, no-store, must-revalidate",
+      "Pragma": "no-cache",
+      "Expires": "0",
+      "Accept-Ranges": "bytes",
+    };
+
+    if (fileSize && fileSize > 0) {
+      headers["Content-Length"] = fileSize.toString();
+    }
+
     const response = new NextResponse(webStream, {
       status: 200,
-      headers: {
-        "Content-Type": contentType,
-        "Content-Disposition": `attachment; filename="${safeAsciiName}"; filename*=UTF-8''${encodedUtf8Name}`,
-        "Cache-Control": "no-cache, no-store, must-revalidate",
-        "Pragma": "no-cache",
-        "Expires": "0",
-        "Transfer-Encoding": "chunked",
-      },
+      headers,
     });
 
     req.signal.addEventListener("abort", () => {

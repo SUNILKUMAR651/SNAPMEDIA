@@ -1,7 +1,7 @@
 # Multi-Stage Production Dockerfile for All-in-One Video Downloader
 # Base image includes Node 20, Python 3, ffmpeg, and yt-dlp
 
-FROM node:20-bullseye-slim AS base
+FROM node:20-bookworm-slim AS base
 
 # Install ffmpeg, python3, pip, curl, and certificates
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -13,7 +13,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Install and update yt-dlp to latest release
-RUN pip3 install --no-cache-dir -U yt-dlp
+RUN pip3 install --no-cache-dir --break-system-packages -U yt-dlp
 
 WORKDIR /app
 

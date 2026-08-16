@@ -43,11 +43,11 @@ export function getYtDlpPath(): string {
   }
 
   const directPaths = [
+    "/usr/local/bin/yt-dlp",
+    "/usr/bin/yt-dlp",
     "C:\\Users\\sunil\\AppData\\Local\\Programs\\Python\\Python311\\Scripts\\yt-dlp.exe",
     "C:\\Program Files\\yt-dlp\\yt-dlp.exe",
     "C:\\yt-dlp\\yt-dlp.exe",
-    "/usr/local/bin/yt-dlp",
-    "/usr/bin/yt-dlp",
   ];
 
   for (const p of directPaths) {
@@ -59,6 +59,63 @@ export function getYtDlpPath(): string {
   }
 
   return "yt-dlp";
+}
+
+/**
+ * Returns cookie arguments if YOUTUBE_COOKIES or cookies.txt is provided
+ */
+export function getYtDlpCookieArgs(): string[] {
+  const cookiePathEnv = process.env.YOUTUBE_COOKIE_PATH;
+  if (cookiePathEnv && fs.existsSync(cookiePathEnv)) {
+    return ["--cookies", cookiePathEnv];
+  }
+
+  const localCookiePaths = [
+    path.join(process.cwd(), "cookies.txt"),
+    path.join(process.cwd(), "backend", "cookies.txt"),
+    path.join(os.tmpdir(), "yt_cookies.txt"),
+    "/tmp/yt_cookies.txt",
+  ];
+
+  for (const cp of localCookiePaths) {
+    try {
+      if (fs.existsSync(cp)) return ["--cookies", cp];
+    } catch {}
+  }
+
+  // If raw cookies string or base64 is set in environment variable
+  const rawCookies = process.env.YOUTUBE_COOKIES;
+  if (rawCookies && rawCookies.trim()) {
+    try {
+      let content = rawCookies.trim();
+      if (!content.includes("\t") && content.length > 50) {
+        try {
+          const decoded = Buffer.from(content, "base64").toString("utf-8");
+          if (decoded.includes("\t") || decoded.includes("youtube.com")) {
+            content = decoded;
+          }
+        } catch {}
+      }
+      const tmpPath = path.join(os.tmpdir(), "yt_cookies_auto.txt");
+      fs.writeFileSync(tmpPath, content, "utf-8");
+      return ["--cookies", tmpPath];
+    } catch (e) {
+      console.warn("Failed to write temporary cookies file:", e);
+    }
+  }
+
+  return [];
+}
+
+/**
+ * Returns proxy args if PROXY_URL or HTTP_PROXY is configured
+ */
+export function getYtDlpProxyArgs(): string[] {
+  const proxy = process.env.PROXY_URL || process.env.HTTP_PROXY || process.env.HTTPS_PROXY;
+  if (proxy && proxy.trim()) {
+    return ["--proxy", proxy.trim()];
+  }
+  return [];
 }
 
 function formatDuration(seconds: number): string {
@@ -73,7 +130,7 @@ function formatDuration(seconds: number): string {
   return `${m}:${s.toString().padStart(2, "0")}`;
 }
 
-function formatBytes(bytes?: number): string {
+export function formatBytes(bytes?: number): string {
   if (!bytes || isNaN(bytes) || bytes <= 0) return "Auto Size";
   if (bytes < 1024 * 1024) {
     return `${(bytes / 1024).toFixed(1)} KB`;
@@ -132,6 +189,8 @@ function runYtDlpProcess(ytdlpPath: string, url: string, extraArgs: string[]): P
       "--no-check-certificates",
       "--socket-timeout", "25",
       "--geo-bypass",
+      ...getYtDlpCookieArgs(),
+      ...getYtDlpProxyArgs(),
       "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
     ];
 
@@ -182,10 +241,10 @@ export async function extractMediaInfo(rawUrl: string): Promise<ExtractedMediaIn
   // Run oEmbed fast metadata fetch in parallel
   const oembedPromise = fetchOembedData(url);
 
-  // Fast single-pass execution with socket timeout 8s
+  // Fast single-pass execution with client fallbacks
   const resultPromise = runYtDlpProcess(ytdlpPath, url, [
-    "--extractor-args", "youtube:player_client=mweb,ios,android,web,tv",
-    "--socket-timeout", "8",
+    "--extractor-args", "youtube:player_client=android,web,ios;player_skip=configs",
+    "--socket-timeout", "20",
   ]);
 
   const [oembed, result] = await Promise.all([oembedPromise, resultPromise]);
@@ -206,7 +265,7 @@ export async function extractMediaInfo(rawUrl: string): Promise<ExtractedMediaIn
     }
   }
 
-  console.warn("yt-dlp extraction failed or timed out. Serving instant oEmbed metadata.");
+  console.warn("yt-dlp extraction failed or timed out. Serving instant metadata ladder.");
   return getFallbackExtractedData(url, platformInfo.platform);
 }
 
@@ -289,7 +348,7 @@ function parseYtDlpJson(data: any, originalUrl: string, platform: SupportedPlatf
     const resolutionStr = f.resolution || (h ? `${f.width || ""}x${f.height || h}` : undefined);
 
     videoFormats.push({
-      id: f.format_id || `${h}p`,
+      id: `${h}p`,
       quality: qualityLabel,
       ext: "mp4",
       resolution: resolutionStr,
@@ -304,20 +363,42 @@ function parseYtDlpJson(data: any, originalUrl: string, platform: SupportedPlatf
     });
   }
 
-  if (videoFormats.length === 0) {
-    videoFormats.push(
-      { id: "bestvideo+bestaudio/best", quality: "4K UHD (2160p)", ext: "mp4", hasVideo: true, hasAudio: true, fileSize: "Auto 4K" },
-      { id: "best[height<=1080]", quality: "Full HD (1080p)", ext: "mp4", hasVideo: true, hasAudio: true, fileSize: "Auto 1080p" },
-      { id: "best[height<=720]", quality: "HD (720p)", ext: "mp4", hasVideo: true, hasAudio: true, fileSize: "Auto 720p" },
-      { id: "best[height<=480]", quality: "SD (480p)", ext: "mp4", hasVideo: true, hasAudio: true, fileSize: "Auto 480p" },
-      { id: "best[height<=360]", quality: "360p", ext: "mp4", hasVideo: true, hasAudio: true, fileSize: "Auto 360p" }
-    );
+  // If YouTube/Instagram provided only 1 single format (e.g. 360p format 18), expand standard ladder
+  if (videoFormats.length <= 1) {
+    const maxKnown = videoFormats.length === 1 ? videoFormats[0].height || 360 : 1080;
+    const standardLadders = [
+      { height: 1080, quality: "Full HD (1080p)", res: "1920x1080", bitrate: 3500 },
+      { height: 720, quality: "HD (720p)", res: "1280x720", bitrate: 1800 },
+      { height: 480, quality: "SD (480p)", res: "854x480", bitrate: 900 },
+      { height: 360, quality: "360p", res: "640x360", bitrate: 500 },
+    ];
+
+    const currentHeights = new Set(videoFormats.map((v) => v.height));
+    for (const ladder of standardLadders) {
+      if (!currentHeights.has(ladder.height)) {
+        const estBytes = duration > 0 ? (ladder.bitrate * 1000 * duration) / 8 : undefined;
+        videoFormats.push({
+          id: `${ladder.height}p`,
+          quality: ladder.quality,
+          ext: "mp4",
+          resolution: ladder.res,
+          height: ladder.height,
+          hasVideo: true,
+          hasAudio: true,
+          fileSize: estBytes ? formatBytes(estBytes) : `Auto ${ladder.height}p`,
+          approxBytes: estBytes,
+        });
+      }
+    }
+    videoFormats.sort((a, b) => (b.height || 0) - (a.height || 0));
   }
 
   if (audioFormats.length === 0) {
+    const dur = duration || 210;
     audioFormats.push(
-      { id: "bestaudio", quality: "MP3 Audio (320kbps High Quality)", ext: "mp3", hasVideo: false, hasAudio: true, fileSize: "Auto (~6 MB)" },
-      { id: "bestaudio[abr<=128]", quality: "MP3 Audio (128kbps Standard)", ext: "mp3", hasVideo: false, hasAudio: true, fileSize: "Auto (~3 MB)" }
+      { id: "bestaudio", quality: "MP3 Audio (320kbps Studio Quality)", ext: "mp3", hasVideo: false, hasAudio: true, fileSize: formatBytes((320 * 1000 * dur) / 8) },
+      { id: "bestaudio[abr<=192]", quality: "MP3 Audio (192kbps High Quality)", ext: "mp3", hasVideo: false, hasAudio: true, fileSize: formatBytes((192 * 1000 * dur) / 8) },
+      { id: "bestaudio[abr<=128]", quality: "MP3 Audio (128kbps Standard)", ext: "mp3", hasVideo: false, hasAudio: true, fileSize: formatBytes((128 * 1000 * dur) / 8) }
     );
   }
 
@@ -407,14 +488,14 @@ async function getFallbackExtractedData(url: string, platform: SupportedPlatform
     platform,
     originalUrl: url,
     formats: [
-      { id: "bestvideo+bestaudio/best", quality: "4K UHD (2160p)", ext: "mp4", resolution: "3840x2160", hasVideo: true, hasAudio: true, fileSize: "Auto 4K" },
-      { id: "best[height<=1080]", quality: "Full HD (1080p)", ext: "mp4", resolution: "1920x1080", hasVideo: true, hasAudio: true, fileSize: "Auto 1080p" },
-      { id: "best[height<=720]", quality: "HD (720p)", ext: "mp4", resolution: "1280x720", hasVideo: true, hasAudio: true, fileSize: "Auto 720p" },
-      { id: "best[height<=480]", quality: "SD (480p)", ext: "mp4", resolution: "854x480", hasVideo: true, hasAudio: true, fileSize: "Auto 480p" },
-      { id: "best[height<=360]", quality: "360p", ext: "mp4", resolution: "640x360", hasVideo: true, hasAudio: true, fileSize: "Auto 360p" },
+      { id: "1080p", quality: "Full HD (1080p)", ext: "mp4", resolution: "1920x1080", height: 1080, hasVideo: true, hasAudio: true, fileSize: "Auto 1080p" },
+      { id: "720p", quality: "HD (720p)", ext: "mp4", resolution: "1280x720", height: 720, hasVideo: true, hasAudio: true, fileSize: "Auto 720p" },
+      { id: "480p", quality: "SD (480p)", ext: "mp4", resolution: "854x480", height: 480, hasVideo: true, hasAudio: true, fileSize: "Auto 480p" },
+      { id: "360p", quality: "360p", ext: "mp4", resolution: "640x360", height: 360, hasVideo: true, hasAudio: true, fileSize: "Auto 360p" },
     ],
     audioFormats: [
-      { id: "bestaudio", quality: "MP3 Audio (320kbps High Quality)", ext: "mp3", hasVideo: false, hasAudio: true, fileSize: "Auto MP3" },
+      { id: "bestaudio", quality: "MP3 Audio (320kbps Studio Quality)", ext: "mp3", hasVideo: false, hasAudio: true, fileSize: "Auto MP3" },
+      { id: "bestaudio[abr<=192]", quality: "MP3 Audio (192kbps High Quality)", ext: "mp3", hasVideo: false, hasAudio: true, fileSize: "Auto MP3" },
       { id: "bestaudio[abr<=128]", quality: "MP3 Audio (128kbps Standard)", ext: "mp3", hasVideo: false, hasAudio: true, fileSize: "Auto MP3" },
     ],
   };
