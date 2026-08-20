@@ -10,7 +10,14 @@ require("dotenv").config();
 
 const execAsync = promisify(exec);
 const app = express();
-const PORT = process.env.PORT || 5000;
+const PORT = parseInt(process.env.PORT, 10) || 10000;
+
+process.on("uncaughtException", (err) => {
+  console.error("Uncaught Exception:", err);
+});
+process.on("unhandledRejection", (reason, promise) => {
+  console.error("Unhandled Rejection:", reason);
+});
 
 // Enable CORS for all frontends (Vercel, Render, Localhost)
 app.use(
@@ -23,6 +30,11 @@ app.use(
 );
 
 app.use(express.json());
+
+// Render standard health check
+app.get("/healthz", (req, res) => {
+  res.status(200).send("OK");
+});
 
 // Rate Limiter: 60 requests per minute
 const limiter = rateLimit({
