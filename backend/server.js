@@ -19,6 +19,8 @@ process.on("unhandledRejection", (reason, promise) => {
   console.error("Unhandled Rejection:", reason);
 });
 
+app.set("trust proxy", 1);
+
 // Enable CORS for all frontends (Vercel, Render, Localhost)
 app.use(
   cors({
@@ -36,10 +38,10 @@ app.get("/healthz", (req, res) => {
   res.status(200).send("OK");
 });
 
-// Rate Limiter: 60 requests per minute
+// Relaxed Rate Limiter for cloud proxies: 300 requests per minute
 const limiter = rateLimit({
   windowMs: 60 * 1000,
-  max: 60,
+  max: 300,
   message: { error: "Too many requests. Please slow down." },
 });
 app.use("/api/", limiter);

@@ -26,7 +26,7 @@ export interface RateLimitResult {
 
 export function checkRateLimit(
   identifier: string,
-  maxRequests: number = 30,
+  maxRequests: number = 150,
   windowSeconds: number = 60
 ): RateLimitResult {
   const now = Date.now();
