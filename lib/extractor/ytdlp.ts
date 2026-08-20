@@ -243,8 +243,8 @@ export async function extractMediaInfo(rawUrl: string): Promise<ExtractedMediaIn
 
   // Fast single-pass execution with client fallbacks
   const resultPromise = runYtDlpProcess(ytdlpPath, url, [
-    "--extractor-args", "youtube:player_client=android,web,ios;player_skip=configs",
-    "--socket-timeout", "20",
+    "--extractor-args", "youtube:player_client=ios,android,web,mweb;player_skip=configs",
+    "--socket-timeout", "25",
   ]);
 
   const [oembed, result] = await Promise.all([oembedPromise, resultPromise]);

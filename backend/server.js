@@ -243,6 +243,9 @@ app.get("/api/health", async (req, res) => {
     ffmpegVer = m ? m[1] : "installed";
   } catch (e) {}
 
+  const cookieArgs = getCookieArgs();
+  const proxyArgs = getProxyArgs();
+
   res.json({
     status: "online",
     timestamp: new Date().toISOString(),
@@ -250,7 +253,14 @@ app.get("/api/health", async (req, res) => {
       ytdlp: ytdlpVer,
       ffmpeg: ffmpegVer,
       ready: true,
+      cookiesConfigured: cookieArgs.length > 0,
+      proxyConfigured: proxyArgs.length > 0,
     },
+    tips: {
+      datacenterYouTubeNote: cookieArgs.length > 0
+        ? "YouTube cookies are active."
+        : "YouTube cookies are NOT configured. On cloud datacenters (Render/AWS/VPS), YouTube may block downloads without cookies.txt / YOUTUBE_COOKIES.",
+    }
   });
 });
 
@@ -262,10 +272,11 @@ function executeYtDlp(ytdlpPath, url, extractorArgs = []) {
       "--no-warnings",
       "--no-playlist",
       "--no-check-certificates",
-      "--socket-timeout", "25",
+      "--socket-timeout", "30",
       "--geo-bypass",
       ...getCookieArgs(),
       ...getProxyArgs(),
+      "--extractor-args", "youtube:player_client=ios,android,web,mweb;player_skip=configs",
       "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
     ];
 
@@ -575,11 +586,11 @@ app.get("/api/download", async (req, res) => {
     "--no-playlist",
     "--no-warnings",
     "--no-check-certificates",
-    "--socket-timeout", "40",
+    "--socket-timeout", "45",
     "--geo-bypass",
     ...getCookieArgs(),
     ...getProxyArgs(),
-    "--extractor-args", "youtube:player_client=android,web,ios;player_skip=configs",
+    "--extractor-args", "youtube:player_client=ios,android,web,mweb;player_skip=configs",
     "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
   ];
 
@@ -634,7 +645,9 @@ app.get("/api/download", async (req, res) => {
 
     child.on("error", (err) => {
       console.error("Downloader spawn error:", err);
-      if (!res.headersSent) res.status(500).send("Downloader execution error.");
+      if (!res.headersSent) {
+        res.status(500).json({ error: `Downloader process error: ${err.message}` });
+      }
     });
 
     child.on("close", (code) => {
@@ -675,7 +688,7 @@ app.get("/api/download", async (req, res) => {
           stream.on("end", cleanup);
           stream.on("error", (err) => {
             cleanup();
-            if (!res.headersSent) res.status(500).send("Stream reading error.");
+            if (!res.headersSent) res.status(500).json({ error: "Stream reading error." });
           });
 
           stream.pipe(res);
@@ -685,12 +698,18 @@ app.get("/api/download", async (req, res) => {
 
       console.error("Download failed on backend. Exit code:", code, "Stderr:", stderrData);
       if (!res.headersSent) {
-        res.status(500).send(`Failed to generate media: ${stderrData.slice(-300) || "Unknown error"}`);
+        const isBotBlock = stderrData.includes("Sign in") || stderrData.includes("bot") || stderrData.includes("403");
+        res.status(500).json({
+          error: isBotBlock
+            ? "YouTube Anti-Bot Protection triggered on cloud server. YouTube cookies or proxy required."
+            : `Failed to generate media: ${stderrData.slice(-300) || "Unknown error"}`,
+          details: stderrData.slice(-300) || undefined,
+        });
       }
     });
   } catch (err) {
     console.error("Server download route exception:", err);
-    if (!res.headersSent) res.status(500).send("Server download exception.");
+    if (!res.headersSent) res.status(500).json({ error: `Server download exception: ${err.message}` });
   }
 });
 

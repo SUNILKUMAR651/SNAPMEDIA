@@ -37,3 +37,6 @@ next-env.d.ts
 # temp files created during media processing
 /tmp/
 /downloads/
+*.part
+cookies.txt
+backend/cookies.txt

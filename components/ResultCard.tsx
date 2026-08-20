@@ -16,6 +16,9 @@ import {
   Eye,
   Loader2,
   ImageIcon,
+  AlertTriangle,
+  AlertCircle,
+  RefreshCw,
 } from "lucide-react";
 import { ExtractedMediaInfo, MediaFormat } from "@/lib/extractor/ytdlp";
 
@@ -28,13 +31,17 @@ export function ResultCard({ data, onReset }: ResultCardProps) {
   const [activeTab, setActiveTab] = useState<"video" | "audio" | "cover">("video");
   const [downloadingFormatId, setDownloadingFormatId] = useState<string | null>(null);
   const [downloadProgress, setDownloadProgress] = useState<number>(0);
+  const [statusMessage, setStatusMessage] = useState<string>("");
   const [completedFormatId, setCompletedFormatId] = useState<string | null>(null);
+  const [downloadError, setDownloadError] = useState<string | null>(null);
   const [copiedLink, setCopiedLink] = useState(false);
 
-  const handleDownload = (format: MediaFormat, isAudio: boolean = false) => {
+  const handleDownload = async (format: MediaFormat, isAudio: boolean = false) => {
     setDownloadingFormatId(format.id);
-    setDownloadProgress(15);
+    setDownloadProgress(10);
     setCompletedFormatId(null);
+    setDownloadError(null);
+    setStatusMessage("Connecting to engine...");
 
     const bitrate = format.quality.includes("320") ? "320k" : (format.quality.includes("192") ? "192k" : "128k");
 
@@ -44,34 +51,113 @@ export function ResultCard({ data, onReset }: ResultCardProps) {
       format.id
     )}&is_audio=${isAudio}&bitrate=${bitrate}&title=${encodeURIComponent(data.title)}&ext=${format.ext}`;
 
-    // Animated download progress feedback
-    const interval = setInterval(() => {
+    // Status updater while processing
+    const progressInterval = setInterval(() => {
       setDownloadProgress((prev) => {
-        if (prev >= 90) {
-          clearInterval(interval);
-          return 90;
+        if (prev < 35) {
+          setStatusMessage("Connecting & extracting stream...");
+          return prev + 8;
         }
-        return prev + 15;
+        if (prev < 70) {
+          setStatusMessage("Merging with FFmpeg...");
+          return prev + 5;
+        }
+        if (prev < 90) {
+          setStatusMessage("Preparing final file...");
+          return prev + 2;
+        }
+        return 90;
       });
-    }, 200);
+    }, 400);
 
-    // Trigger browser download via invisible link
-    const link = document.createElement("a");
-    link.href = downloadEndpoint;
-    link.setAttribute("download", `${data.title}.${format.ext}`);
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
+    try {
+      let response: Response | null = null;
 
-    setTimeout(() => {
-      clearInterval(interval);
+      // 1. Try configured backend URL
+      if (backendUrl) {
+        try {
+          response = await fetch(downloadEndpoint);
+        } catch (netErr) {
+          console.warn("Fetch to backendUrl failed, attempting local /api/download fallback:", netErr);
+        }
+      }
+
+      // 2. Fallback to local /api/download if backendUrl failed or returned 503/502
+      if (!response || response.status === 503 || response.status === 502) {
+        const localEndpoint = `/api/download?url=${encodeURIComponent(data.originalUrl)}&format_id=${encodeURIComponent(
+          format.id
+        )}&is_audio=${isAudio}&bitrate=${bitrate}&title=${encodeURIComponent(data.title)}&ext=${format.ext}`;
+        try {
+          const fallbackResp = await fetch(localEndpoint);
+          if (fallbackResp.ok) {
+            response = fallbackResp;
+          } else if (!response) {
+            response = fallbackResp;
+          }
+        } catch {}
+      }
+
+      clearInterval(progressInterval);
+
+      if (!response || !response.ok) {
+        let errorDetail = "";
+        try {
+          const errJson = await response?.json();
+          errorDetail = errJson?.error || errJson?.details || "";
+        } catch {
+          errorDetail = (await response?.text().catch(() => "")) || "";
+        }
+
+        if (response?.status === 503) {
+          throw new Error(
+            "Render Backend 503 (Service Unavailable): snapmedia-backend.onrender.com is offline, crashed, or suspended on Render. Please check your Render Dashboard Logs."
+          );
+        } else if (response?.status === 403 || errorDetail.toLowerCase().includes("bot") || errorDetail.toLowerCase().includes("sign in")) {
+          throw new Error(
+            "YouTube Anti-Bot Block: Cloud datacenter IP is blocked by YouTube. Please configure YOUTUBE_COOKIES or a proxy on your backend server."
+          );
+        } else if (response?.status === 504 || response?.status === 502) {
+          throw new Error(
+            "Server timeout: Processing took too long. If using Render free tier, server may be cold-starting. Please try again."
+          );
+        } else {
+          throw new Error(errorDetail || `Download failed (HTTP ${response?.status || "Network Error"}).`);
+        }
+      }
+
+      setStatusMessage("Saving to your device...");
+      setDownloadProgress(95);
+
+      const blob = await response.blob();
+      const blobUrl = window.URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = blobUrl;
+      const cleanTitle = data.title.replace(/[\\/:*?"<>|]/g, "_").slice(0, 60);
+      link.setAttribute("download", `${cleanTitle || "download"}.${format.ext}`);
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+
+      setTimeout(() => {
+        window.URL.revokeObjectURL(blobUrl);
+      }, 2000);
+
       setDownloadProgress(100);
+      setStatusMessage("Done!");
       setCompletedFormatId(format.id);
       setTimeout(() => {
         setDownloadingFormatId(null);
         setDownloadProgress(0);
+        setStatusMessage("");
       }, 3000);
-    }, 1500);
+    } catch (err: any) {
+      clearInterval(progressInterval);
+      setDownloadingFormatId(null);
+      setDownloadProgress(0);
+      setStatusMessage("");
+      console.error("Download failed:", err);
+      setDownloadError(err.message || "Failed to download media. Please check server status or try another format.");
+    }
   };
 
   const handleCopyLink = () => {
@@ -123,6 +209,23 @@ export function ResultCard({ data, onReset }: ResultCardProps) {
       <div className="relative overflow-hidden rounded-3xl bg-white/95 dark:bg-zinc-900/95 border border-zinc-200/80 dark:border-zinc-800/80 shadow-2xl backdrop-blur-2xl">
         {/* Glow accent */}
         <div className="absolute top-0 right-0 w-80 h-80 bg-indigo-500/10 dark:bg-indigo-500/20 blur-[100px] rounded-full pointer-events-none" />
+
+        {/* Error notification banner */}
+        {downloadError && (
+          <div className="mx-6 sm:mx-8 mt-6 p-4 rounded-2xl bg-rose-500/10 border border-rose-500/30 text-rose-600 dark:text-rose-400 flex items-start gap-3 text-sm animate-fade-in">
+            <AlertCircle className="w-5 h-5 shrink-0 mt-0.5" />
+            <div className="flex-1">
+              <p className="font-bold">Download could not be completed</p>
+              <p className="mt-1 text-xs opacity-90 leading-relaxed">{downloadError}</p>
+            </div>
+            <button
+              onClick={() => setDownloadError(null)}
+              className="text-xs font-semibold px-2.5 py-1 rounded-lg bg-rose-500/20 hover:bg-rose-500/30 transition-colors"
+            >
+              Dismiss
+            </button>
+          </div>
+        )}
 
         {/* Card Header & Video Meta */}
         <div className="p-6 sm:p-8 border-b border-zinc-100 dark:border-zinc-800/80">
@@ -423,6 +526,17 @@ export function ResultCard({ data, onReset }: ResultCardProps) {
             </div>
           )}
         </div>
+
+        {/* Active download status bar */}
+        {downloadingFormatId && statusMessage && (
+          <div className="px-6 sm:px-8 py-2.5 bg-indigo-500/10 dark:bg-indigo-500/15 border-t border-indigo-500/20 flex items-center justify-between text-xs text-indigo-600 dark:text-indigo-400 font-semibold animate-pulse">
+            <div className="flex items-center gap-2">
+              <Loader2 className="w-3.5 h-3.5 animate-spin" />
+              <span>{statusMessage}</span>
+            </div>
+            <span>{downloadProgress}%</span>
+          </div>
+        )}
 
         {/* Footer info note */}
         <div className="px-6 sm:px-8 py-3.5 bg-zinc-100/60 dark:bg-zinc-950/60 border-t border-zinc-100 dark:border-zinc-800/80 flex items-center justify-between text-[11px] text-zinc-600 dark:text-zinc-300">

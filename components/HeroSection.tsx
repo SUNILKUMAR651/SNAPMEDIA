@@ -98,21 +98,27 @@ export function HeroSection({
     setErrorMessage(null);
 
     try {
-      let response = await fetch("/api/fetch-info", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ url: url.trim() }),
-      });
+      const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL;
+      let response: Response | null = null;
 
-      if (!response.ok) {
-        const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL;
-        if (backendUrl) {
+      if (backendUrl) {
+        try {
           response = await fetch(`${backendUrl}/api/fetch-info`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ url: url.trim() }),
           });
+        } catch (e) {
+          console.warn("Direct backend fetch failed, trying local API:", e);
         }
+      }
+
+      if (!response || !response.ok) {
+        response = await fetch("/api/fetch-info", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ url: url.trim() }),
+        });
       }
 
       const json = await response.json();
