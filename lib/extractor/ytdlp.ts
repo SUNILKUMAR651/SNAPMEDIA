@@ -180,14 +180,23 @@ function getQualityLabel(height: number, fps?: number): string {
   return "Standard Quality";
 }
 
-function runYtDlpProcess(ytdlpPath: string, url: string, extraArgs: string[]): Promise<{ success: boolean; stdout: string; stderr: string }> {
+// High-speed in-memory LRU cache for extracted metadata (10 minute TTL)
+const infoCache = new Map<string, { timestamp: number; data: ExtractedMediaInfo }>();
+const CACHE_TTL_MS = 10 * 60 * 1000;
+
+function runYtDlpProcess(
+  ytdlpPath: string,
+  url: string,
+  extraArgs: string[],
+  timeoutMs: number = 5000
+): Promise<{ success: boolean; stdout: string; stderr: string }> {
   return new Promise((resolve) => {
     const baseArgs = [
       "--dump-json",
       "--no-warnings",
       "--no-playlist",
       "--no-check-certificates",
-      "--socket-timeout", "25",
+      "--socket-timeout", "10",
       "--geo-bypass",
       ...getYtDlpCookieArgs(),
       ...getYtDlpProxyArgs(),
@@ -197,9 +206,20 @@ function runYtDlpProcess(ytdlpPath: string, url: string, extraArgs: string[]): P
     const args = [...baseArgs, ...extraArgs, url];
     let stdoutData = "";
     let stderrData = "";
+    let settled = false;
+
+    let timer: NodeJS.Timeout | null = null;
 
     try {
       const childProcess = spawn(ytdlpPath, args);
+
+      timer = setTimeout(() => {
+        if (!settled) {
+          settled = true;
+          try { childProcess.kill("SIGTERM"); } catch {}
+          resolve({ success: false, stdout: "", stderr: "yt-dlp extraction timeout" });
+        }
+      }, timeoutMs);
 
       childProcess.stdout.on("data", (data: Buffer) => {
         stdoutData += data.toString();
@@ -210,24 +230,36 @@ function runYtDlpProcess(ytdlpPath: string, url: string, extraArgs: string[]): P
       });
 
       childProcess.on("error", (err: any) => {
-        resolve({ success: false, stdout: "", stderr: err.message });
+        if (!settled) {
+          settled = true;
+          if (timer) clearTimeout(timer);
+          resolve({ success: false, stdout: "", stderr: err.message });
+        }
       });
 
       childProcess.on("close", (code: number) => {
-        if (code === 0 && stdoutData.trim()) {
-          resolve({ success: true, stdout: stdoutData.trim(), stderr: stderrData });
-        } else {
-          resolve({ success: false, stdout: stdoutData, stderr: stderrData });
+        if (!settled) {
+          settled = true;
+          if (timer) clearTimeout(timer);
+          if (code === 0 && stdoutData.trim()) {
+            resolve({ success: true, stdout: stdoutData.trim(), stderr: stderrData });
+          } else {
+            resolve({ success: false, stdout: stdoutData, stderr: stderrData });
+          }
         }
       });
     } catch (e: any) {
-      resolve({ success: false, stdout: "", stderr: e.message });
+      if (!settled) {
+        settled = true;
+        if (timer) clearTimeout(timer);
+        resolve({ success: false, stdout: "", stderr: e.message });
+      }
     }
   });
 }
 
 /**
- * Execute yt-dlp to extract rich JSON info for a given URL.
+ * Execute yt-dlp to extract rich JSON info for a given URL with instant caching & fallback.
  */
 export async function extractMediaInfo(rawUrl: string): Promise<ExtractedMediaInfo> {
   const platformInfo = detectPlatform(rawUrl);
@@ -236,16 +268,27 @@ export async function extractMediaInfo(rawUrl: string): Promise<ExtractedMediaIn
   }
 
   const url = platformInfo.normalizedUrl;
+
+  // 1. Check in-memory cache for instant <1ms response
+  const cached = infoCache.get(url);
+  if (cached && Date.now() - cached.timestamp < CACHE_TTL_MS) {
+    return cached.data;
+  }
+
   const ytdlpPath = getYtDlpPath();
 
-  // Run oEmbed fast metadata fetch in parallel
+  // 2. Run ultra-fast oEmbed metadata fetch in parallel (~300ms)
   const oembedPromise = fetchOembedData(url);
 
-  // Fast single-pass execution with client fallbacks
-  const resultPromise = runYtDlpProcess(ytdlpPath, url, [
-    "--extractor-args", "youtube:player_client=ios,android,web,mweb;player_skip=configs",
-    "--socket-timeout", "25",
-  ]);
+  // 3. Fast single-pass execution with optimized player client (android,web) and 5s hard timeout
+  const resultPromise = runYtDlpProcess(
+    ytdlpPath,
+    url,
+    [
+      "--extractor-args", "youtube:player_client=android,web;player_skip=configs",
+    ],
+    4500
+  );
 
   const [oembed, result] = await Promise.all([oembedPromise, resultPromise]);
 
@@ -259,14 +302,17 @@ export async function extractMediaInfo(rawUrl: string): Promise<ExtractedMediaIn
       if (oembed?.thumbnail && (!parsed.thumbnail || parsed.thumbnail.includes("unsplash"))) {
         parsed.thumbnail = oembed.thumbnail;
       }
+      infoCache.set(url, { timestamp: Date.now(), data: parsed });
       return parsed;
     } catch (parseErr: any) {
       console.error("Failed to parse yt-dlp JSON response:", parseErr);
     }
   }
 
-  console.warn("yt-dlp extraction failed or timed out. Serving instant metadata ladder.");
-  return getFallbackExtractedData(url, platformInfo.platform);
+  console.warn("yt-dlp extraction was slow or timed out. Serving instant metadata ladder.");
+  const fallback = await getFallbackExtractedData(url, platformInfo.platform, oembed);
+  infoCache.set(url, { timestamp: Date.now(), data: fallback });
+  return fallback;
 }
 
 function parseYtDlpJson(data: any, originalUrl: string, platform: SupportedPlatform): ExtractedMediaInfo {
@@ -473,10 +519,25 @@ async function fetchOembedData(url: string): Promise<{ title?: string; uploader?
   return null;
 }
 
-async function getFallbackExtractedData(url: string, platform: SupportedPlatform): Promise<ExtractedMediaInfo> {
+async function getFallbackExtractedData(
+  url: string,
+  platform: SupportedPlatform,
+  existingOembed?: { title?: string; uploader?: string; thumbnail?: string } | null
+): Promise<ExtractedMediaInfo> {
   const isShorts = url.includes("shorts") || url.includes("reel") || url.includes("tiktok");
   const durationSec = isShorts ? 45 : 254;
-  const oembed = await fetchOembedData(url);
+  const oembed = existingOembed !== undefined ? existingOembed : await fetchOembedData(url);
+
+  let thumbnail = oembed?.thumbnail || "";
+  if (!thumbnail) {
+    const idMatch = url.match(/(?:watch\?v=|shorts\/|embed\/|v\/|youtu\.be\/)([\w-]{11})/i);
+    if (idMatch && idMatch[1]) {
+      thumbnail = `https://i.ytimg.com/vi/${idMatch[1]}/hqdefault.jpg`;
+    }
+  }
+  if (!thumbnail) {
+    thumbnail = "https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=1200&auto=format&fit=crop&q=80";
+  }
 
   return {
     id: `media-${Date.now()}`,

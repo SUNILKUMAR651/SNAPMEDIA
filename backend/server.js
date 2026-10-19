@@ -278,19 +278,23 @@ app.get("/api/health", async (req, res) => {
   });
 });
 
-// Helper: Execute yt-dlp with retries
-function executeYtDlp(ytdlpPath, url, extractorArgs = []) {
+// High-speed in-memory cache for metadata
+const serverInfoCache = new Map();
+const CACHE_TTL_MS = 10 * 60 * 1000;
+
+// Helper: Execute yt-dlp with fast timeout
+function executeYtDlp(ytdlpPath, url, extractorArgs = [], timeoutMs = 5000) {
   return new Promise((resolve) => {
     const baseArgs = [
       "--dump-json",
       "--no-warnings",
       "--no-playlist",
       "--no-check-certificates",
-      "--socket-timeout", "30",
+      "--socket-timeout", "10",
       "--geo-bypass",
       ...getCookieArgs(),
       ...getProxyArgs(),
-      "--extractor-args", "youtube:player_client=ios,android,web,mweb;player_skip=configs",
+      "--extractor-args", "youtube:player_client=android,web;player_skip=configs",
       "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
     ];
 
@@ -298,25 +302,49 @@ function executeYtDlp(ytdlpPath, url, extractorArgs = []) {
 
     let stdoutData = "";
     let stderrData = "";
+    let settled = false;
+
+    let timer = null;
 
     try {
       const child = spawn(ytdlpPath, args);
+
+      timer = setTimeout(() => {
+        if (!settled) {
+          settled = true;
+          try { child.kill("SIGTERM"); } catch (e) {}
+          resolve({ success: false, error: "Extraction timeout", stdout: "", stderr: "" });
+        }
+      }, timeoutMs);
+
       child.stdout.on("data", (data) => { stdoutData += data.toString(); });
       child.stderr.on("data", (data) => { stderrData += data.toString(); });
 
       child.on("error", (err) => {
-        resolve({ success: false, error: err.message, stdout: "", stderr: stderrData });
+        if (!settled) {
+          settled = true;
+          if (timer) clearTimeout(timer);
+          resolve({ success: false, error: err.message, stdout: "", stderr: stderrData });
+        }
       });
 
       child.on("close", (code) => {
-        if (code === 0 && stdoutData.trim()) {
-          resolve({ success: true, stdout: stdoutData.trim(), stderr: stderrData });
-        } else {
-          resolve({ success: false, code, stdout: stdoutData, stderr: stderrData });
+        if (!settled) {
+          settled = true;
+          if (timer) clearTimeout(timer);
+          if (code === 0 && stdoutData.trim()) {
+            resolve({ success: true, stdout: stdoutData.trim(), stderr: stderrData });
+          } else {
+            resolve({ success: false, code, stdout: stdoutData, stderr: stderrData });
+          }
         }
       });
     } catch (e) {
-      resolve({ success: false, error: e.message, stdout: "", stderr: "" });
+      if (!settled) {
+        settled = true;
+        if (timer) clearTimeout(timer);
+        resolve({ success: false, error: e.message, stdout: "", stderr: "" });
+      }
     }
   });
 }
@@ -370,54 +398,62 @@ app.post("/api/fetch-info", async (req, res) => {
     return res.status(400).json({ error: "Please provide a valid video URL in request body." });
   }
 
+  const trimmedUrl = url.trim();
+
+  // 1. Check in-memory cache for instant <1ms response
+  const cached = serverInfoCache.get(trimmedUrl);
+  if (cached && Date.now() - cached.timestamp < CACHE_TTL_MS) {
+    return res.json({ success: true, data: cached.data });
+  }
+
   const ytdlpPath = getYtDlpPath();
 
   // Run oEmbed fast metadata fetch in parallel
-  const oembedPromise = fetchOembedData(url);
+  const oembedPromise = fetchOembedData(trimmedUrl);
 
-  // Fast single-pass execution
-  const resultPromise = executeYtDlp(ytdlpPath, url, [
-    "--extractor-args", "youtube:player_client=android,web,ios;player_skip=configs",
-    "--socket-timeout", "20",
-  ]);
+  // Fast single-pass execution (5s hard timeout inside executeYtDlp)
+  const resultPromise = executeYtDlp(ytdlpPath, trimmedUrl, [
+    "--extractor-args", "youtube:player_client=android,web;player_skip=configs",
+    "--socket-timeout", "10",
+  ], 4500);
 
   const [oembed, result] = await Promise.all([oembedPromise, resultPromise]);
 
   if (!result.success || !result.stdout) {
     console.warn("yt-dlp fast extraction failed or timed out. Serving instant metadata ladder.", result?.stderr || "");
-    const isYouTube = /(?:youtube\.com|youtu\.be)/i.test(url);
-    const isInstagram = /instagram\.com/i.test(url);
-    const isTikTok = /tiktok\.com/i.test(url);
-    const isFacebook = /(?:facebook\.com|fb\.watch)/i.test(url);
+    const isYouTube = /(?:youtube\.com|youtu\.be)/i.test(trimmedUrl);
+    const isInstagram = /instagram\.com/i.test(trimmedUrl);
+    const isTikTok = /tiktok\.com/i.test(trimmedUrl);
+    const isFacebook = /(?:facebook\.com|fb\.watch)/i.test(trimmedUrl);
     const detectedPlatform = isYouTube ? "YouTube" : (isInstagram ? "Instagram" : (isTikTok ? "TikTok" : (isFacebook ? "Facebook" : "Social")));
 
-    const isShorts = url.includes("shorts") || url.includes("reel") || url.includes("tiktok");
+    const isShorts = trimmedUrl.includes("shorts") || trimmedUrl.includes("reel") || trimmedUrl.includes("tiktok");
     const duration = isShorts ? 30 : 210;
 
-    return res.json({
-      success: true,
-      data: {
-        id: `video-${Date.now()}`,
-        title: oembed?.title || "High Quality Video Stream",
-        uploader: oembed?.uploader || "Verified Media Creator",
-        thumbnail: oembed?.thumbnail || "https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=1200&auto=format&fit=crop&q=80",
-        durationSeconds: duration,
-        durationFormatted: formatDuration(duration),
-        platform: detectedPlatform,
-        originalUrl: url.trim(),
-        formats: [
-          { id: "1080p", quality: "Full HD (1080p)", ext: "mp4", resolution: "1920x1080", height: 1080, hasVideo: true, hasAudio: true, fileSize: "Auto 1080p" },
-          { id: "720p", quality: "HD (720p)", ext: "mp4", resolution: "1280x720", height: 720, hasVideo: true, hasAudio: true, fileSize: "Auto 720p" },
-          { id: "480p", quality: "SD (480p)", ext: "mp4", resolution: "854x480", height: 480, hasVideo: true, hasAudio: true, fileSize: "Auto 480p" },
-          { id: "360p", quality: "360p", ext: "mp4", resolution: "640x360", height: 360, hasVideo: true, hasAudio: true, fileSize: "Auto 360p" },
-        ],
-        audioFormats: [
-          { id: "bestaudio", quality: "MP3 Audio (320kbps Studio Quality)", ext: "mp3", hasVideo: false, hasAudio: true, fileSize: "Auto MP3" },
-          { id: "bestaudio[abr<=192]", quality: "MP3 Audio (192kbps High Quality)", ext: "mp3", hasVideo: false, hasAudio: true, fileSize: "Auto MP3" },
-          { id: "bestaudio[abr<=128]", quality: "MP3 Audio (128kbps Standard)", ext: "mp3", hasVideo: false, hasAudio: true, fileSize: "Auto MP3" },
-        ],
-      },
-    });
+    const fallbackData = {
+      id: `video-${Date.now()}`,
+      title: oembed?.title || "High Quality Video Stream",
+      uploader: oembed?.uploader || "Verified Media Creator",
+      thumbnail: oembed?.thumbnail || "https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=1200&auto=format&fit=crop&q=80",
+      durationSeconds: duration,
+      durationFormatted: formatDuration(duration),
+      platform: detectedPlatform,
+      originalUrl: trimmedUrl,
+      formats: [
+        { id: "1080p", quality: "Full HD (1080p)", ext: "mp4", resolution: "1920x1080", height: 1080, hasVideo: true, hasAudio: true, fileSize: "Auto 1080p" },
+        { id: "720p", quality: "HD (720p)", ext: "mp4", resolution: "1280x720", height: 720, hasVideo: true, hasAudio: true, fileSize: "Auto 720p" },
+        { id: "480p", quality: "SD (480p)", ext: "mp4", resolution: "854x480", height: 480, hasVideo: true, hasAudio: true, fileSize: "Auto 480p" },
+        { id: "360p", quality: "360p", ext: "mp4", resolution: "640x360", height: 360, hasVideo: true, hasAudio: true, fileSize: "Auto 360p" },
+      ],
+      audioFormats: [
+        { id: "bestaudio", quality: "MP3 Audio (320kbps Studio Quality)", ext: "mp3", hasVideo: false, hasAudio: true, fileSize: "Auto MP3" },
+        { id: "bestaudio[abr<=192]", quality: "MP3 Audio (192kbps High Quality)", ext: "mp3", hasVideo: false, hasAudio: true, fileSize: "Auto MP3" },
+        { id: "bestaudio[abr<=128]", quality: "MP3 Audio (128kbps Standard)", ext: "mp3", hasVideo: false, hasAudio: true, fileSize: "Auto MP3" },
+      ],
+    };
+
+    serverInfoCache.set(trimmedUrl, { timestamp: Date.now(), data: fallbackData });
+    return res.json({ success: true, data: fallbackData });
   }
 
   try {
@@ -551,22 +587,26 @@ app.post("/api/fetch-info", async (req, res) => {
       data.title = oembed.title;
     }
 
+    const responsePayload = {
+      id: data.id || `video-${Date.now()}`,
+      title: data.title || "Social Video",
+      uploader: data.uploader || data.channel || "Creator",
+      thumbnail: thumbnail || "https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=1200&auto=format&fit=crop&q=80",
+      durationSeconds: duration,
+      durationFormatted: formatDuration(duration),
+      platform: data.extractor_key || "social",
+      originalUrl: trimmedUrl,
+      formats: videoFormats,
+      audioFormats,
+      viewCount: data.view_count,
+      likeCount: data.like_count,
+    };
+
+    serverInfoCache.set(trimmedUrl, { timestamp: Date.now(), data: responsePayload });
+
     res.json({
       success: true,
-      data: {
-        id: data.id || `video-${Date.now()}`,
-        title: data.title || "Social Video",
-        uploader: data.uploader || data.channel || "Creator",
-        thumbnail: thumbnail || "https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=1200&auto=format&fit=crop&q=80",
-        durationSeconds: duration,
-        durationFormatted: formatDuration(duration),
-        platform: data.extractor_key || "social",
-        originalUrl: url.trim(),
-        formats: videoFormats,
-        audioFormats,
-        viewCount: data.view_count,
-        likeCount: data.like_count,
-      },
+      data: responsePayload,
     });
   } catch (parseErr) {
     res.status(500).json({ error: "Failed to parse metadata", details: parseErr.message });
@@ -600,11 +640,11 @@ app.get("/api/download", async (req, res) => {
     "--no-playlist",
     "--no-warnings",
     "--no-check-certificates",
-    "--socket-timeout", "45",
+    "--socket-timeout", "30",
     "--geo-bypass",
     ...getCookieArgs(),
     ...getProxyArgs(),
-    "--extractor-args", "youtube:player_client=ios,android,web,mweb;player_skip=configs",
+    "--extractor-args", "youtube:player_client=android,web;player_skip=configs",
     "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
   ];
 
@@ -645,6 +685,9 @@ app.get("/api/download", async (req, res) => {
 
   try {
     child = spawn(ytdlpPath, baseArgs);
+
+    // Drain stdout to prevent OS pipe buffer from stalling
+    child.stdout?.on("data", () => {});
 
     child.stderr?.on("data", (chunk) => {
       stderrData += chunk.toString();

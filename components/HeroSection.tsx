@@ -103,13 +103,17 @@ export function HeroSection({
 
       if (backendUrl) {
         try {
+          const controller = new AbortController();
+          const timeoutId = setTimeout(() => controller.abort(), 3500);
           response = await fetch(`${backendUrl}/api/fetch-info`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ url: url.trim() }),
+            signal: controller.signal,
           });
+          clearTimeout(timeoutId);
         } catch (e) {
-          console.warn("Direct backend fetch failed, trying local API:", e);
+          console.warn("Direct backend fetch failed or timed out, trying local API:", e);
         }
       }
 
