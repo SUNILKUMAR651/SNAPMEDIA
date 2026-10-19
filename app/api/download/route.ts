@@ -7,6 +7,9 @@ export const dynamic = "force-dynamic";
 export const maxDuration = 120; // Allow sufficient time for merging high-res videos
 
 function nodeReadableToWebReadable(nodeStream: Readable): ReadableStream {
+  if (typeof (Readable as any).toWeb === "function") {
+    return (Readable as any).toWeb(nodeStream);
+  }
   return new ReadableStream({
     start(controller) {
       nodeStream.on("data", (chunk: Buffer) => {

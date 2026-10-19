@@ -160,6 +160,9 @@ export async function createDownloadStream(options: StreamProcessingOptions): Pr
     try {
       childProcess = spawn(ytdlpPath, baseArgs);
 
+      // Drain stdout to prevent OS pipe buffer from filling and stalling the child process
+      childProcess.stdout?.on("data", () => {});
+
       childProcess.stderr?.on("data", (chunk: Buffer) => {
         stderrData += chunk.toString();
       });
